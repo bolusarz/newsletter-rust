@@ -1,18 +1,24 @@
 //! tests/health_check.rs
 
-use newsletter_api::configuration::get_configuration;
+use newsletter_api::configuration::{DatabaseSettings, get_configuration};
 use newsletter_api::startup;
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::net::TcpListener;
+use uuid::Uuid;
+
+pub struct TestApp {
+    pub address: String,
+    pub db_pool: PgPool,
+}
 
 #[actix_web::test]
 async fn health_check_works() {
-    let url = spawn_app();
+    let app = spawn_app().await;
 
     let client = reqwest::Client::new();
 
     let response = client
-        .get(format!("{url}/health"))
+        .get(format!("{}/health", app.address))
         .send()
         .await
         .expect("Failed to execute request.");
@@ -23,7 +29,7 @@ async fn health_check_works() {
 
 #[actix_web::test]
 async fn subscribe_returns_a_200_for_valid_form_data() {
-    let app_address = spawn_app();
+    let app = spawn_app().await;
     let configuration = get_configuration().expect("Failed to read configuration");
     let connection_string = configuration.database.connection_string();
     let mut connection = PgConnection::connect(&connection_string)
@@ -34,7 +40,7 @@ async fn subscribe_returns_a_200_for_valid_form_data() {
 
     let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
     let response = client
-        .post(format!("{app_address}/subscriptions"))
+        .post(format!("{}/subscriptions", app.address))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -55,7 +61,7 @@ async fn subscribe_returns_a_200_for_valid_form_data() {
 #[actix_web::test]
 async fn subscribe_returns_a_400_when_data_is_missing() {
     // Arrange
-    let app_address = spawn_app();
+    let app = spawn_app().await;
     let client = reqwest::Client::new();
     let test_cases = vec![
         ("name=le%20guin", "missing the email"),
@@ -66,7 +72,7 @@ async fn subscribe_returns_a_400_when_data_is_missing() {
     for (invalid_body, error_message) in test_cases {
         // Act
         let response = client
-            .post(format!("{app_address}/subscriptions"))
+            .post(format!("{}/subscriptions", app.address))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(invalid_body)
             .send()
@@ -83,13 +89,42 @@ async fn subscribe_returns_a_400_when_data_is_missing() {
     }
 }
 
-fn spawn_app() -> String {
+async fn spawn_app() -> TestApp {
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
-
     let port = listener.local_addr().unwrap().port();
-    let server = startup::run(listener).expect("Failed to bind address");
+
+    let mut configuration = get_configuration().expect("Failed to read configuration.");
+    configuration.database.database_name = Uuid::new_v4().to_string();
+    let connection = configure_database(&configuration.database).await;
+
+    let server = startup::run(listener, connection.clone()).expect("Failed to bind address");
     // Run the server in the background so the test can proceed.
     let _ = actix_web::rt::spawn(server);
 
-    format!("http://127.0.0.1:{port}")
+    TestApp {
+        db_pool: connection,
+        address: format!("http://127.0.0.1:{port}"),
+    }
+}
+
+pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
+    let connection = PgPool::connect(&config.connection_string_without_db())
+        .await
+        .expect("Failed to connect to postgres");
+    let query = format!(r#"CREATE DATABASE "{}";"#, config.database_name);
+    connection
+        .execute(sqlx::AssertSqlSafe(query))
+        .await
+        .expect("Failed to create database.");
+
+    let connection_pool = PgPool::connect(&config.connection_string())
+        .await
+        .expect("Failed to connect to db");
+
+    sqlx::migrate!("./migrations")
+        .run(&connection_pool)
+        .await
+        .expect("Failed to migrate db");
+
+    connection_pool
 }
