@@ -1,6 +1,27 @@
 [package]
-name = "newsletter-api"
+name = "newsletter_api"
 version = "0.1.0"
 edition = "2024"
+authors = ["Boluwatife Oluwatosin Adewusi <ayomikunadewusi@gmail.com>"]
 
 [dependencies]
+actix-web = "4"
+serde = { version = "1.0.229", features = ["derive"] }
+config = "0.11.0"
+
+
+[dependencies.sqlx]
+version = "0.9.0"
+default-features = false
+features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "macros",
+    "postgres",
+    "uuid",
+    "chrono",
+    "migrate"
+]
+
+[dev-dependencies]
+reqwest = "0.13.5"
